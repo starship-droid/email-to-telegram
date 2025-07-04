@@ -6,6 +6,7 @@ import requests
 from datetime import datetime
 import pytz
 import email.utils
+import re
 
 # Configuration from environment
 IMAP_SERVER = os.environ.get("IMAP_SERVER")
@@ -13,20 +14,46 @@ EMAIL_ACCOUNT = os.environ.get("EMAIL_ACCOUNT")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GROUP_ID = os.environ.get("TELEGRAM_GROUP_ID")
-TOPIC_ID = int(os.environ.get("TELEGRAM_TOPIC_ID", "0"))  # Your fixed topic id here
+TOPIC_ID = int(os.environ.get("TELEGRAM_TOPIC_ID", "0"))
 
 
-def send_to_telegram(subject, body, images, topic_id, sender_name, sender_email, timestamp_str):
-    message_text = (
-        f"📧 Subject: {subject}\n"
-        f"👤 From: {sender_name} <{sender_email}>\n"
-        f"🕒 Sent: {timestamp_str}\n\n"
-        f"{body}"
-    )
+def extract_forwarded_headers(body_text):
+    """Attempt to extract original From and To from forwarded message content"""
+    original_from = None
+    original_to = None
+
+    # Common patterns for forwarded emails
+    from_match = re.search(r"(?i)^From:\s*(.+)", body_text, re.MULTILINE)
+    to_match = re.search(r"(?i)^To:\s*(.+)", body_text, re.MULTILINE)
+
+    if from_match:
+        original_from = from_match.group(1).strip()
+    if to_match:
+        original_to = to_match.group(1).strip()
+
+    return original_from, original_to
+
+
+def send_to_telegram(subject, body, images, topic_id, sender_name, sender_email, timestamp_str, original_from=None, original_to=None, header_to=None):
+    # Compose message
+    message_text = f"📧 Subject: {subject}\n"
+
+    if original_from:
+        message_text += f"👤 Originally From: {original_from}\n"
+    else:
+        message_text += f"👤 From: {sender_name} <{sender_email}>\n"
+
+    if original_to:
+        message_text += f"📬 Originally To: {original_to}\n"
+    elif header_to:
+        message_text += f"📬 To: {header_to}\n"
+
+    message_text += f"🕒 Sent: {timestamp_str}\n\n{body}"
+
     print(f"[📤] Sending message to Telegram topic ID: {topic_id}")
 
     if images:
-        # Send first image with caption (the message text)
+        # Send first image with caption
         name, image = images[0]
         print(f"[🖼️] Uploading image with caption: {name}")
         photo_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
@@ -40,7 +67,6 @@ def send_to_telegram(subject, body, images, topic_id, sender_name, sender_email,
         if not r.ok:
             raise Exception(f"[❌] Failed to send photo with caption: {r.text}")
 
-        # Send remaining images without caption
         for name, image in images[1:]:
             print(f"[🖼️] Uploading image: {name}")
             files = {'photo': (name, image)}
@@ -51,9 +77,7 @@ def send_to_telegram(subject, body, images, topic_id, sender_name, sender_email,
             r = requests.post(photo_url, files=files, data=data)
             if not r.ok:
                 print(f"[⚠️] Failed to send image: {r.text}")
-
     else:
-        # No images: send text message normally
         message_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         res = requests.post(message_url, data={
             "chat_id": GROUP_ID,
@@ -63,7 +87,6 @@ def send_to_telegram(subject, body, images, topic_id, sender_name, sender_email,
 
         if not res.ok:
             raise Exception(f"[❌] Failed to send message: {res.text}")
-
 
 
 def parse_emails():
@@ -90,6 +113,11 @@ def parse_emails():
         print(f"[👤] From: {sender_name} <{sender_email}>")
         print(f"[📝] Subject: {subject}")
 
+        # Parse "To" header
+        to_full = msg.get("To")
+        _, to_email = email.utils.parseaddr(to_full or "")
+        print(f"[📬] To: {to_email}")
+
         # Parse date
         raw_date = msg.get("Date")
         try:
@@ -108,9 +136,9 @@ def parse_emails():
             content_type = part.get_content_type()
             if part.get_content_maintype() == "multipart":
                 continue
-            if content_type == "text/plain":
+            if content_type == "text/plain" and not body:
                 try:
-                    body = part.get_payload(decode=True).decode()
+                    body = part.get_payload(decode=True).decode(errors="ignore")
                 except Exception as e:
                     print(f"[⚠️] Failed to decode body: {e}")
                     body = "[Unable to decode body]"
@@ -119,13 +147,26 @@ def parse_emails():
                 img_data = part.get_payload(decode=True)
                 images.append((filename or "image.jpg", img_data))
 
+        # Try to extract forwarded sender and recipient
+        original_from, original_to = extract_forwarded_headers(body)
+
         try:
             if TOPIC_ID == 0:
                 raise Exception("TELEGRAM_TOPIC_ID is not set or zero in .env")
 
-            send_to_telegram(subject, body, images, TOPIC_ID, sender_name, sender_email, timestamp_str)
+            send_to_telegram(
+                subject=subject,
+                body=body,
+                images=images,
+                topic_id=TOPIC_ID,
+                sender_name=sender_name,
+                sender_email=sender_email,
+                timestamp_str=timestamp_str,
+                original_from=original_from,
+                original_to=original_to,
+                header_to=to_email
+            )
 
-            # Mark as read only after success
             print(f"[✅] Marking email as read: {eid.decode()}")
             mail.store(eid, '+FLAGS', '\\Seen')
 
