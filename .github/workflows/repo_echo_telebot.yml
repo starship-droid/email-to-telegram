@@ -1,0 +1,50 @@
+name: Notify Telegram on PRs and Commits
+
+on:
+  pull_request:
+    types: [opened, closed]
+  push:
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Telegram Message
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          COMMIT_URL: ${{ github.event.head_commit.url }}
+          COMMIT_AUTHOR: ${{ github.event.head_commit.author.name }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          IS_MERGED: ${{ github.event.pull_request.merged }}
+        run: |
+          if [ "$EVENT_NAME" = "push" ]; then
+            TEXT="🆕 *New Commit* pushed by $GITHUB_ACTOR in \`$REPO\`%0A*Message:* $COMMIT_MESSAGE%0A🔗 $COMMIT_URL"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            if [ "$IS_MERGED" = "true" ]; then
+              TEXT="✅ *PR Merged* by $PR_AUTHOR: *$PR_TITLE*%0A🔗 $PR_URL"
+            else
+              TEXT="📣 *New PR* by $PR_AUTHOR: *$PR_TITLE*%0A🔗 $PR_URL"
+            fi
+          else
+            TEXT="ℹ️ Unrecognized event: $EVENT_NAME"
+          fi
+
+          CURL_ARGS=(
+            -d chat_id="$TELEGRAM_CHAT_ID"
+            -d text="$TEXT"
+            -d parse_mode=Markdown
+          )
+
+          if [ -n "$TELEGRAM_THREAD_ID" ]; then
+            CURL_ARGS+=(-d message_thread_id="$TELEGRAM_THREAD_ID")
+          fi
+
+          curl -s -X POST https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage "${CURL_ARGS[@]}"
