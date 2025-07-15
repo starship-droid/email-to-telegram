@@ -10,8 +10,13 @@ import mimetypes
 import io
 import traceback
 import json
-from dotenv import load_dotenv
-load_dotenv()
+import time
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # Safe to skip if dotenv isn't available
+
 
 # Configuration from environment
 IMAP_SERVER = os.environ.get("IMAP_SERVER")
@@ -68,6 +73,13 @@ def send_to_telegram(subject, body, attachments, topic_id, sender_name, sender_e
     files = {}
 
     for i, (filename, filedata) in enumerate(attachments):
+        print(f"[📎] Preparing attachment: {filename} ({len(filedata)} bytes)")
+
+        if not filedata or len(filedata) == 0:
+            print(f"[⚠️] Skipping empty file: {filename}")
+            send_telegram_text(f"⚠️ Skipping empty file: {filename}", topic_id)
+            continue
+
         mime_type, _ = mimetypes.guess_type(filename)
         if not mime_type:
             mime_type = "application/octet-stream"
@@ -93,37 +105,109 @@ def send_to_telegram(subject, body, attachments, topic_id, sender_name, sender_e
 
         grouped_media_by_type[media_type].append((media_item, fieldname))
 
-    for media_type, items in grouped_media_by_type.items():
+    # Helper function to send media group and fallback to single sends on failure
+    def send_media_group_or_fallback(media_type, items):
         if not items:
-            continue
+            return
 
         print(f"[📎] Sending {len(items)} '{media_type}' attachments in media groups")
 
-        # Send in chunks of MAX_MEDIA_PER_GROUP
         for i in range(0, len(items), MAX_MEDIA_PER_GROUP):
             chunk = items[i:i + MAX_MEDIA_PER_GROUP]
             chunk_media = [item[0] for item in chunk]
             chunk_file_keys = [item[1] for item in chunk]
             chunk_files = {k: files[k] for k in chunk_file_keys}
 
-            print(f"[📎] Sending media group {i // MAX_MEDIA_PER_GROUP + 1} with {len(chunk)} items")
+            # Filter out any empty files again just in case
+            filtered_chunk = []
+            filtered_files = {}
+            for md, key in zip(chunk_media, chunk_file_keys):
+                file_bytes = chunk_files[key][1].getvalue()
+                if len(file_bytes) == 0:
+                    print(f"[⚠️] Skipping empty file in chunk: {chunk_files[key][0]}")
+                    send_telegram_text(f"⚠️ Skipping empty file in chunk: {chunk_files[key][0]}", topic_id)
+                else:
+                    filtered_chunk.append(md)
+                    filtered_files[key] = chunk_files[key]
+
+            if not filtered_chunk:
+                print(f"[⚠️] Skipping sending media group with all empty files for {media_type}")
+                continue
+
+            print(f"[📎] Sending media group {i // MAX_MEDIA_PER_GROUP + 1} with {len(filtered_chunk)} items")
+
             send_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMediaGroup"
             payload = {
                 "chat_id": GROUP_ID,
                 "message_thread_id": topic_id,
-                "media": json.dumps(chunk_media)
+                "media": json.dumps(filtered_chunk)
             }
 
-            response = requests.post(send_url, data=payload, files=chunk_files)
-            if not response.ok:
-                error_text = (
-                    f"⚠️ Failed to send media group ({media_type}): {response.text}"
-                )
-                print(f"[⚠️] {error_text}")
-                send_telegram_text(error_text, topic_id)
-            else:
-                print(f"[✅] Media group {i // MAX_MEDIA_PER_GROUP + 1} sent successfully")
+            MAX_RETRIES = 3
+            retry_delay = 0
 
+            for attempt in range(1, MAX_RETRIES + 1):
+                if retry_delay > 0:
+                    print(f"[⏳] Waiting {retry_delay}s before retrying...")
+                    time.sleep(retry_delay)
+
+                response = requests.post(send_url, data=payload, files=filtered_files)
+
+                if response.ok:
+                    print(f"[✅] Media group {i // MAX_MEDIA_PER_GROUP + 1} sent successfully")
+                    break
+                else:
+                    resp_json = response.json()
+                    if response.status_code == 429:
+                        retry_after = resp_json.get("parameters", {}).get("retry_after", 5)
+                        retry_delay = retry_after
+                        print(f"[⏳] Rate limited. Retrying in {retry_delay} seconds...")
+                        if attempt == MAX_RETRIES:
+                            send_telegram_text(
+                                f"⚠️ Failed to send media group after retries ({media_type}): {response.text}",
+                                topic_id,
+                            )
+                    elif response.status_code == 400 and "file must be non-empty" in response.text:
+                        print(f"[⚠️] Media group failed due to empty file, fallback to sending individually...")
+                        # Send files one by one
+                        for md, key in zip(filtered_chunk, filtered_files.keys()):
+                            filename = filtered_files[key][0]
+                            fileobj = filtered_files[key][1]
+                            file_bytes = fileobj.getvalue()
+                            if len(file_bytes) == 0:
+                                print(f"[⚠️] Skipping empty file during fallback: {filename}")
+                                send_telegram_text(f"⚠️ Skipping empty file during fallback: {filename}", topic_id)
+                                continue
+
+                            send_single_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
+                            single_payload = {
+                                "chat_id": GROUP_ID,
+                                "message_thread_id": topic_id,
+                                "caption": "",  # Optionally put something here
+                            }
+                            single_files = {
+                                "document": (filename, io.BytesIO(file_bytes))
+                            }
+                            single_resp = requests.post(send_single_url, data=single_payload, files=single_files)
+                            if single_resp.ok:
+                                print(f"[✅] Sent single {media_type} file: {filename}")
+                            else:
+                                print(f"[⚠️] Failed to send single file {filename}: {single_resp.text}")
+                                send_telegram_text(
+                                    f"⚠️ Failed to send single file {filename}: {single_resp.text}",
+                                    topic_id,
+                                )
+                        break  # exit retry loop after fallback attempt
+                    else:
+                        print(f"[⚠️] Failed to send media group: {response.text}")
+                        send_telegram_text(
+                            f"⚠️ Failed to send media group ({media_type}): {response.text}",
+                            topic_id,
+                        )
+                        break
+
+    for media_type, items in grouped_media_by_type.items():
+        send_media_group_or_fallback(media_type, items)
 
 
 def parse_emails():
