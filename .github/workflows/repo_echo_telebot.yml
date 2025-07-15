@@ -12,8 +12,8 @@ jobs:
       - name: Send Telegram Message
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_GROUP_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_TOPIC_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+          TELEGRAM_GROUP_ID: ${{ secrets.TELEGRAM_GROUP_ID }}
+          TELEGRAM_TOPIC_ID: ${{ secrets.TELEGRAM_TOPIC_ID }}
           EVENT_NAME: ${{ github.event_name }}
           GITHUB_ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
@@ -38,13 +38,13 @@ jobs:
           fi
 
           CURL_ARGS=(
-            -d chat_id="$TELEGRAM_CHAT_ID"
+            -d chat_id="$TELEGRAM_GROUP_ID"
             -d text="$TEXT"
             -d parse_mode=Markdown
           )
 
-          if [ -n "$TELEGRAM_THREAD_ID" ]; then
-            CURL_ARGS+=(-d message_thread_id="$TELEGRAM_THREAD_ID")
+          if [ -n "$TELEGRAM_TOPIC_ID" ]; then
+            CURL_ARGS+=(-d message_thread_id="$TELEGRAM_TOPIC_ID")
           fi
 
           curl -s -X POST https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage "${CURL_ARGS[@]}"
